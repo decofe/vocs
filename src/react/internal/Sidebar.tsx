@@ -18,27 +18,25 @@ const maxDepth = 5
 const ActiveAnchorContext = React.createContext<string | null>(null)
 
 /**
- * The set of in-page anchor ids that the sidebar actually links to (the `#frag`
- * of every hash-link item). Used so page-level items only defer their active
- * state to anchors that have a corresponding sidebar item — not to arbitrary
- * headings on a standalone guide page that happens to live under a section
- * whose sidebar uses hash links elsewhere.
+ * The set of in-page anchor ids that the sidebar links to on the current page.
+ * Used so page-level items only defer their active state to corresponding
+ * sidebar items — not to arbitrary headings or hash links for another page.
  */
 const HashIdsContext = React.createContext<ReadonlySet<string>>(new Set())
 
-/** Whether any sidebar item links to an in-page anchor. */
-function hasHashLink(items: Sidebar_core.SidebarItem[]): boolean {
-  return items.some((item) => item.link?.includes('#') || (item.items && hasHashLink(item.items)))
-}
-
-/** Collects the `#fragment` ids of every hash-link sidebar item. */
-function collectHashIds(items: Sidebar_core.SidebarItem[], ids = new Set<string>()): Set<string> {
+/** Collects the `#fragment` ids of hash-link sidebar items for the current page. */
+function collectHashIds(
+  items: Sidebar_core.SidebarItem[],
+  path: string,
+  ids = new Set<string>(),
+): Set<string> {
+  const pagePath = path.split('#')[0] ?? path
   for (const item of items) {
-    if (item.link?.includes('#')) {
-      const id = item.link.split('#')[1]
-      if (id) ids.add(id)
+    if (item.link?.includes('#') && !Path.isExternal(item.link)) {
+      const [itemPath, id] = item.link.split('#')
+      if (id && (!itemPath || Path.matches(pagePath, itemPath))) ids.add(id)
     }
-    if (item.items) collectHashIds(item.items, ids)
+    if (item.items) collectHashIds(item.items, pagePath, ids)
   }
   return ids
 }
@@ -48,20 +46,11 @@ function collectHashIds(items: Sidebar_core.SidebarItem[], ids = new Set<string>
  * (used by the OpenAPI section) can show active state. Mirrors the Outline's
  * IntersectionObserver approach.
  */
-function useActiveAnchor(enabled: boolean, path: string): string | null {
+function useActiveAnchor(hashIds: ReadonlySet<string>, path: string): string | null {
   const [activeId, setActiveId] = React.useState<string | null>(null)
 
   React.useEffect(() => {
-    if (!enabled || typeof window === 'undefined') return
-
-    // Reset on every client-side navigation: derive the active section from the
-    // hash of the destination `path` (landing pages like the OpenAPI section
-    // root have none, so they start with no active section). Reading `path`
-    // here — rather than only `window.location` — keeps it a genuine effect
-    // dependency so navigation reliably re-runs this.
-    const hashFromPath = path.includes('#') ? path.slice(path.indexOf('#') + 1) : ''
-    const hash = hashFromPath || (window.location.hash ? window.location.hash.slice(1) : '')
-    setActiveId(hash || null)
+    if (hashIds.size === 0 || typeof window === 'undefined') return
 
     // OpenAPI pages render inside `article[data-v-content]` too, so the generic
     // markdown selector would also match operation sub-headings (Parameters,
@@ -73,6 +62,25 @@ function useActiveAnchor(enabled: boolean, path: string): string | null {
     const selector = isOpenApi
       ? '[data-v-openapi-h1][id], [data-v-openapi-operation-title][id]'
       : 'article[data-v-content] :is(h2, h3, h4, h5, h6)[id]'
+
+    // Reset on every client-side navigation. If the destination hash belongs
+    // to a nested heading without a sidebar item, keep its nearest preceding
+    // sidebar anchor active instead of falling back to the page-level item.
+    // Reading `path` here — rather than only `window.location` — keeps it a
+    // genuine effect dependency so navigation reliably re-runs this.
+    const hashFromPath = path.includes('#') ? path.slice(path.indexOf('#') + 1) : ''
+    const hash = hashFromPath || (window.location.hash ? window.location.hash.slice(1) : '')
+    let initialId = hashIds.has(hash) ? hash : null
+    const target = hash ? document.getElementById(hash) : null
+    if (!initialId && target) {
+      for (const element of document.querySelectorAll(selector)) {
+        const position = element.compareDocumentPosition(target)
+        if (element === target || position & Node.DOCUMENT_POSITION_PRECEDING) break
+        if (hashIds.has(element.id)) initialId = element.id
+      }
+    }
+    setActiveId(initialId)
+
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries)
@@ -87,6 +95,9 @@ function useActiveAnchor(enabled: boolean, path: string): string | null {
     const observeAll = () => {
       observer.disconnect()
       for (const element of document.querySelectorAll(selector)) {
+        // Nested headings without matching sidebar items belong to the current
+        // section. Observing them would reactivate the page-level item.
+        if (!hashIds.has(element.id)) continue
         // Skip changelog release-body headings — they have no sidebar entry and
         // would hijack the active section as you scroll through the changelog.
         if (element.closest('[data-v-changelog]')) continue
@@ -105,7 +116,7 @@ function useActiveAnchor(enabled: boolean, path: string): string | null {
       observer.disconnect()
       mutation?.disconnect()
     }
-  }, [enabled, path])
+  }, [hashIds, path])
 
   return activeId
 }
@@ -118,10 +129,9 @@ export function Sidebar(props: Sidebar.Props) {
     () => Sidebar_core.length(sidebar.items, { startDepth: 2 }) > 25,
     [sidebar.items],
   )
-  const hashLinks = React.useMemo(() => hasHashLink(sidebar.items), [sidebar.items])
-  const hashIds = React.useMemo(() => collectHashIds(sidebar.items), [sidebar.items])
   const { path } = useRouter()
-  const activeAnchor = useActiveAnchor(hashLinks, path)
+  const hashIds = React.useMemo(() => collectHashIds(sidebar.items, path), [sidebar.items, path])
+  const activeAnchor = useActiveAnchor(hashIds, path)
 
   return (
     <HashIdsContext.Provider value={hashIds}>
