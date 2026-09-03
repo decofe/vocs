@@ -94,7 +94,7 @@
     "@takumi-rs/image-response": "^0.62.7",
     "@takumi-rs/wasm": "^0.62.7",
     "@vitejs/plugin-react": "catalog:",
-    "@vitejs/plugin-rsc": "^0.5.26",
+    "@vitejs/plugin-rsc": "^0.5.33",
     "cac": "^6.7.14",
     "cva": "npm:class-variance-authority@^0.7.1",
     "debug": "^4.4.0",
@@ -152,7 +152,7 @@
     "react": "^19",
     "react-dom": "^19",
     "vite": "^8",
-    "waku": "^1.0.0-beta.6"
+    "waku": "^1.0.0-rc.0"
   },
   "peerDependenciesMeta": {
     "@vocs/twoslash-rust": {

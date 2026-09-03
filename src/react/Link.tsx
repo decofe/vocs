@@ -57,11 +57,11 @@ function useViewportPrefetchReady(enabled: boolean) {
 }
 
 export function Link(props: Link.Props) {
-  const { to, unstable_prefetchOnEnter = true, unstable_prefetchOnView = true, ...rest } = props
+  const { to, unstable_prefetchOnEnter = {}, unstable_prefetchOnView = {}, ...rest } = props
   const router = useContext(WakuRouterContext)
   const routerPath = router?.route.path
   const isExternal = Path.isExternal(props.to)
-  const prefetchOnView = useViewportPrefetchReady(
+  const prefetchOnViewReady = useViewportPrefetchReady(
     Boolean(unstable_prefetchOnView) && !isExternal && routerPath !== undefined,
   )
 
@@ -75,7 +75,7 @@ export function Link(props: Link.Props) {
       {...rest}
       to={resolvedTo}
       unstable_prefetchOnEnter={unstable_prefetchOnEnter}
-      unstable_prefetchOnView={prefetchOnView}
+      {...(prefetchOnViewReady ? { unstable_prefetchOnView } : {})}
     />
   )
 }

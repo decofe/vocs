@@ -8,14 +8,14 @@ const storageKey = 'vocs:scroll'
 
 export function ScrollRestoration() {
   const router = useRouter()
-  const { path, unstable_events: events } = router
+  const { path } = router
 
   const savedPositions = useRef<Record<string, number>>({})
   const prevHash = useRef<string | null>(null)
   const prevPath = useRef<string | null>(null)
   const isPopstate = useRef(false)
 
-  // Load saved positions and listen to router events
+  // Load saved positions and listen to browser events
   useEffect(() => {
     if (typeof window === 'undefined') return
 
@@ -31,24 +31,32 @@ export function ScrollRestoration() {
       isPopstate.current = true
     }
 
-    // Save scroll position before navigation starts
-    function handleNavigateStart() {
+    // Waku no longer exposes route change events, so keep the current position
+    // updated as the user scrolls instead of waiting for navigation to start.
+    function handleScroll() {
       if (prevPath.current !== null) {
         savedPositions.current[prevPath.current] = window.scrollY
-        try {
-          sessionStorage.setItem(storageKey, JSON.stringify(savedPositions.current))
-        } catch {}
       }
     }
 
+    function persistPositions() {
+      handleScroll()
+      try {
+        sessionStorage.setItem(storageKey, JSON.stringify(savedPositions.current))
+      } catch {}
+    }
+
     window.addEventListener('popstate', handlePopstate)
-    events.on('start', handleNavigateStart)
+    window.addEventListener('scroll', handleScroll, { passive: true })
+    window.addEventListener('pagehide', persistPositions)
     return () => {
       window.removeEventListener('popstate', handlePopstate)
-      events.off('start', handleNavigateStart)
+      window.removeEventListener('scroll', handleScroll)
+      window.removeEventListener('pagehide', persistPositions)
+      persistPositions()
       window.history.scrollRestoration = 'auto'
     }
-  }, [events])
+  }, [])
 
   // Handle hash changes (same-page anchor navigation)
   useEffect(() => {
