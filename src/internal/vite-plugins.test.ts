@@ -1,11 +1,13 @@
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { ResolvedConfig } from 'vite'
-import { afterEach, describe, expect, test } from 'vitest'
+import { build, type ResolvedConfig } from 'vite'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import type * as Config from './config.js'
+import * as Llms from './llms.js'
 import type * as OpenApi from './openapi/index.js'
 import {
+  llms,
   openapiClientDocument,
   openapiClientManifest,
   openapiSchemaModelsDocument,
@@ -18,8 +20,55 @@ import {
 const tempDirs = new Set<string>()
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await Promise.all([...tempDirs].map((dir) => fs.rm(dir, { force: true, recursive: true })))
   tempDirs.clear()
+})
+
+test('builds Markdown only for the client and preserves it after output cleanup', async () => {
+  const fixture = await createFixture()
+  await fs.writeFile(path.join(fixture.rootDir, 'index.html'), '<html><body>Hello</body></html>')
+  await fs.writeFile(path.join(fixture.rootDir, 'server.js'), 'export const hello = "world"')
+  await fs.writeFile(path.join(fixture.outDir, 'stale.txt'), 'old output')
+  const scan = vi.spyOn(Llms, 'getPagesFromDir')
+  const config = {
+    rootDir: fixture.rootDir,
+    srcDir: 'src',
+    pagesDir: 'pages',
+    outDir: 'dist',
+    title: 'My Docs',
+    codeHighlight: { langs: [] },
+  } as unknown as Config.Config
+  const options = {
+    root: fixture.rootDir,
+    configFile: false as const,
+    logLevel: 'silent' as const,
+  }
+
+  await build({
+    ...options,
+    plugins: [llms(config)],
+    build: { ssr: 'server.js', outDir: 'dist/server' },
+  })
+  expect(scan).not.toHaveBeenCalled()
+
+  await build({
+    ...options,
+    plugins: [llms(config)],
+    build: { outDir: 'dist/public', emptyOutDir: true },
+  })
+
+  expect(scan).toHaveBeenCalledTimes(1)
+  await expect(fs.access(path.join(fixture.outDir, 'stale.txt'))).rejects.toThrow()
+  await expect(fs.readFile(path.join(fixture.outDir, 'llms.txt'), 'utf-8')).resolves.toContain(
+    '# My Docs',
+  )
+  await expect(fs.readFile(path.join(fixture.outDir, 'llms-full.txt'), 'utf-8')).resolves.toContain(
+    '# Hello',
+  )
+  await expect(
+    fs.readFile(path.join(fixture.outDir, 'assets/md/index.md'), 'utf-8'),
+  ).resolves.toContain('# Hello')
 })
 
 describe('openapi client modules', () => {
