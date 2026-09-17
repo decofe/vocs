@@ -170,6 +170,28 @@ export function langWatcher(config: Config.Config): PluginOption {
   }
 }
 
+/** Share Git dates across build environments, without retaining them across builds. */
+export function gitDates(config: gitDates.Options): PluginOption {
+  let enabled = false
+  return {
+    name: 'vocs:git-dates',
+    configResolved(resolvedConfig) {
+      enabled = resolvedConfig.command === 'build' && !resolvedConfig.build.watch
+      Git.resetCache({ scope: config, enabled })
+    },
+    buildApp: {
+      order: 'pre',
+      async handler() {
+        Git.resetCache({ scope: config, enabled })
+      },
+    },
+  }
+}
+
+export declare namespace gitDates {
+  type Options = Config.Config
+}
+
 export function llms(config: Config.Config): PluginOption {
   const { description, title } = config
   let viteConfig: ResolvedConfig
@@ -422,7 +444,7 @@ export function sitemap(config: Config.Config): PluginOption {
         if (!resolveSitemapInclude(config, pagePath, filePath)) return
 
         const loc = `${siteUrl.replace(/\/$/, '')}${pagePath}`
-        const gitDate = Git.getLastModified(page)
+        const gitDate = Git.getLastModified(page, { scope: config })
         const lastmod = gitDate
           ? (gitDate.split('T')[0] as string)
           : ((await fs.stat(page)).mtime.toISOString().split('T')[0] as string)

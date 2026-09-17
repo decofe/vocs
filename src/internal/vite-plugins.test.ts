@@ -1,26 +1,25 @@
+import * as ChildProcess from 'node:child_process'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { build, type ResolvedConfig } from 'vite'
+import { build, createBuilder, type ResolvedConfig, resolveConfig } from 'vite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import type * as Config from './config.js'
+import * as Config from './config.js'
+import * as Git from './git.js'
 import * as Llms from './llms.js'
 import type * as OpenApi from './openapi/index.js'
-import {
-  llms,
-  openapiClientDocument,
-  openapiClientManifest,
-  openapiSchemaModelsDocument,
-  openapiSchemaModelsManifest,
-  resolveSitemapInclude,
-  resolveSitemapLastmod,
-  sitemap,
-} from './vite-plugins.js'
+import * as Plugins from './vite-plugins.js'
 
 const tempDirs = new Set<string>()
 
+vi.mock('node:child_process', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:child_process')>()
+  return { ...original, execSync: vi.fn(original.execSync) }
+})
+
 afterEach(async () => {
   vi.restoreAllMocks()
+  vi.mocked(ChildProcess.execSync).mockReset()
   await Promise.all([...tempDirs].map((dir) => fs.rm(dir, { force: true, recursive: true })))
   tempDirs.clear()
 })
@@ -31,14 +30,13 @@ test('builds Markdown only for the client and preserves it after output cleanup'
   await fs.writeFile(path.join(fixture.rootDir, 'server.js'), 'export const hello = "world"')
   await fs.writeFile(path.join(fixture.outDir, 'stale.txt'), 'old output')
   const scan = vi.spyOn(Llms, 'getPagesFromDir')
-  const config = {
+  const config = Config.define({
     rootDir: fixture.rootDir,
     srcDir: 'src',
-    pagesDir: 'pages',
     outDir: 'dist',
     title: 'My Docs',
     codeHighlight: { langs: [] },
-  } as unknown as Config.Config
+  })
   const options = {
     root: fixture.rootDir,
     configFile: false as const,
@@ -47,14 +45,14 @@ test('builds Markdown only for the client and preserves it after output cleanup'
 
   await build({
     ...options,
-    plugins: [llms(config)],
+    plugins: [Plugins.llms(config)],
     build: { ssr: 'server.js', outDir: 'dist/server' },
   })
   expect(scan).not.toHaveBeenCalled()
 
   await build({
     ...options,
-    plugins: [llms(config)],
+    plugins: [Plugins.llms(config)],
     build: { outDir: 'dist/public', emptyOutDir: true },
   })
 
@@ -71,6 +69,62 @@ test('builds Markdown only for the client and preserves it after output cleanup'
   ).resolves.toContain('# Hello')
 })
 
+test('refreshes Git dates between app builds without reloading modules', async () => {
+  const fixture = await createFixture()
+  await fs.writeFile(path.join(fixture.rootDir, 'index.html'), '<html><body>Hello</body></html>')
+  const config = Config.define({ rootDir: fixture.rootDir })
+  const lookup = vi.mocked(ChildProcess.execSync).mockReturnValue('2026-01-01\n')
+  const dates: (string | undefined)[] = []
+  const builder = await createBuilder({
+    root: fixture.rootDir,
+    configFile: false,
+    logLevel: 'silent',
+    builder: {
+      async buildApp(builder) {
+        for (const environment of Object.values(builder.environments))
+          await builder.build(environment)
+      },
+    },
+    plugins: [
+      Plugins.gitDates(config),
+      {
+        name: 'test:git-consumers',
+        buildStart() {
+          dates.push(Git.getLastModified('index.mdx', { scope: config }))
+        },
+        writeBundle() {
+          dates.push(Git.getLastModified('index.mdx', { scope: config }))
+        },
+      },
+    ],
+  })
+
+  await builder.buildApp()
+  expect(lookup).toHaveBeenCalledTimes(1)
+  lookup.mockReturnValue('2026-02-01\n')
+  await builder.buildApp()
+  expect(lookup).toHaveBeenCalledTimes(2)
+  expect(dates).toEqual(['2026-01-01', '2026-01-01', '2026-02-01', '2026-02-01'])
+})
+
+test.each(['development', 'watch'] as const)('does not cache Git dates in %s', async (mode) => {
+  const config = Config.define()
+  const lookup = vi.mocked(ChildProcess.execSync)
+  await resolveConfig(
+    {
+      configFile: false,
+      plugins: [Plugins.gitDates(config)],
+      build: { watch: mode === 'watch' ? {} : null },
+    },
+    mode === 'watch' ? 'build' : 'serve',
+  )
+  lookup.mockReturnValue('2026-01-01\n')
+  expect(Git.getLastModified('index.mdx', { scope: config })).toBe('2026-01-01')
+  lookup.mockReturnValue('2026-02-01\n')
+  expect(Git.getLastModified('index.mdx', { scope: config })).toBe('2026-02-01')
+  expect(lookup).toHaveBeenCalledTimes(2)
+})
+
 describe('openapi client modules', () => {
   const specs = {
     '/first': { client: { content: { marker: 'first-client' } } },
@@ -78,7 +132,7 @@ describe('openapi client modules', () => {
   } as unknown as Record<string, OpenApi.Ir>
 
   test('creates one lazy document import per mount', () => {
-    const manifest = openapiClientManifest(specs)
+    const manifest = Plugins.openapiClientManifest(specs)
 
     expect(manifest).toContain('virtual:vocs/openapi-client:%2Ffirst')
     expect(manifest).toContain('virtual:vocs/openapi-client:%2Fsecond')
@@ -87,7 +141,7 @@ describe('openapi client modules', () => {
   })
 
   test('serializes only the requested client document', () => {
-    const document = openapiClientDocument(specs, '/first')
+    const document = Plugins.openapiClientDocument(specs, '/first')
 
     expect(document).toContain('first-client')
     expect(document).not.toContain('second-client')
@@ -150,7 +204,7 @@ describe('openapi schema model modules', () => {
   } as unknown as Record<string, OpenApi.Ir>
 
   test('creates one lazy document import per category without inlining models', () => {
-    const manifest = openapiSchemaModelsManifest(specs)
+    const manifest = Plugins.openapiSchemaModelsManifest(specs)
 
     expect(manifest).toContain('virtual:vocs/openapi-schema-models:')
     expect(manifest).toContain('pets')
@@ -160,7 +214,7 @@ describe('openapi schema model modules', () => {
 
   test('serializes only the requested category models', () => {
     const source = JSON.stringify(['/first', 'pets'])
-    const document = openapiSchemaModelsDocument(specs, source)
+    const document = Plugins.openapiSchemaModelsDocument(specs, source)
 
     expect(document).toContain('first schema detail')
     expect(document).not.toContain('second schema detail')
@@ -268,12 +322,12 @@ describe('sitemap', () => {
 
 describe('sitemap config helpers', () => {
   test('resolves include config', () => {
-    expect(resolveSitemapInclude({ sitemap: false }, '/docs', 'docs/index.mdx')).toBe(false)
-    expect(resolveSitemapInclude({ sitemap: { include: false } }, '/docs', 'docs/index.mdx')).toBe(
-      false,
-    )
+    expect(Plugins.resolveSitemapInclude({ sitemap: false }, '/docs', 'docs/index.mdx')).toBe(false)
     expect(
-      resolveSitemapInclude(
+      Plugins.resolveSitemapInclude({ sitemap: { include: false } }, '/docs', 'docs/index.mdx'),
+    ).toBe(false)
+    expect(
+      Plugins.resolveSitemapInclude(
         { sitemap: { include: (path) => path.startsWith('/docs') } },
         '/docs',
         'docs/index.mdx',
@@ -282,11 +336,11 @@ describe('sitemap config helpers', () => {
   })
 
   test('resolves lastmod config', () => {
-    expect(resolveSitemapLastmod({ sitemap: false }, '/docs', 'docs/index.mdx', '2026-01-01')).toBe(
-      undefined,
-    )
     expect(
-      resolveSitemapLastmod(
+      Plugins.resolveSitemapLastmod({ sitemap: false }, '/docs', 'docs/index.mdx', '2026-01-01'),
+    ).toBe(undefined)
+    expect(
+      Plugins.resolveSitemapLastmod(
         { sitemap: { lastmod: false } },
         '/docs',
         'docs/index.mdx',
@@ -294,7 +348,7 @@ describe('sitemap config helpers', () => {
       ),
     ).toBe(undefined)
     expect(
-      resolveSitemapLastmod(
+      Plugins.resolveSitemapLastmod(
         { sitemap: { lastmod: () => '2025-01-01' } },
         '/docs',
         'docs/index.mdx',
@@ -324,7 +378,7 @@ function createSitemapPlugin(
   publicDir: string,
   config: Partial<Config.Config> = {},
 ) {
-  const plugin = sitemap({
+  const plugin = Plugins.sitemap({
     baseUrl: 'https://example.com',
     pagesDir: 'pages',
     srcDir: 'src',

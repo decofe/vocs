@@ -20,6 +20,7 @@ export async function vocs(): Promise<PluginOption[]> {
     Plugins.aiSearch(config),
     Plugins.arraybuffer(),
     Plugins.deps(),
+    Plugins.gitDates(config),
     Plugins.groupIcons(config),
     Plugins.icons({
       compiler: 'jsx',

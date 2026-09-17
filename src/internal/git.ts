@@ -1,21 +1,36 @@
 import { execSync } from 'node:child_process'
 
-const buildDates = new Map<string, string | undefined>()
+const buildDates = new WeakMap<object, Map<string, string | undefined>>()
 
-export function getLastModified(filePath: string): string | undefined {
-  // MDX and the sitemap ask for the same dates during a production build.
-  // Do not cache in dev, where new commits can arrive without a restart.
-  const cache = process.env['NODE_ENV'] === 'production'
-  if (cache && buildDates.has(filePath)) return buildDates.get(filePath)
+/** Start a fresh cache for one build, or disable it for development/watch mode. */
+export function resetCache({ scope, enabled }: resetCache.Options) {
+  if (enabled) buildDates.set(scope, new Map())
+  else buildDates.delete(scope)
+}
+
+export declare namespace resetCache {
+  type Options = { scope: object; enabled: boolean }
+}
+
+export function getLastModified(
+  filePath: string,
+  { scope }: getLastModified.Options = {},
+): string | undefined {
+  const cache = scope ? buildDates.get(scope) : undefined
+  if (cache?.has(filePath)) return cache.get(filePath)
   try {
     const result = execSync(`git log -1 --format=%cI -- "${filePath}"`, {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim()
     const date = result || undefined
-    if (cache) buildDates.set(filePath, date)
+    cache?.set(filePath, date)
     return date
   } catch {
     return undefined
   }
+}
+
+export declare namespace getLastModified {
+  type Options = { scope?: object | undefined }
 }

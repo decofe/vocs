@@ -1,63 +1,75 @@
 import { execSync } from 'node:child_process'
-import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { beforeEach, expect, test, vi } from 'vitest'
+
+import * as Git from './git.js'
 
 vi.mock('node:child_process', () => ({ execSync: vi.fn() }))
 
 beforeEach(() => {
-  vi.resetModules()
   vi.mocked(execSync).mockReset()
 })
 
-afterEach(() => {
-  vi.unstubAllEnvs()
-})
-
-test('reuses production dates independently for each file', async () => {
-  vi.stubEnv('NODE_ENV', 'production')
+test('reuses production dates independently for each file', () => {
+  const scope = {}
+  Git.resetCache({ scope, enabled: true })
   vi.mocked(execSync).mockReturnValueOnce('2026-01-01\n').mockReturnValueOnce('2026-02-01\n')
-  const { getLastModified } = await import('./git.js')
 
-  expect(getLastModified('first.mdx')).toBe('2026-01-01')
-  expect(getLastModified('second.mdx')).toBe('2026-02-01')
-  expect(getLastModified('first.mdx')).toBe('2026-01-01')
+  expect(Git.getLastModified('first.mdx', { scope })).toBe('2026-01-01')
+  expect(Git.getLastModified('second.mdx', { scope })).toBe('2026-02-01')
+  expect(Git.getLastModified('first.mdx', { scope })).toBe('2026-01-01')
   expect(execSync).toHaveBeenCalledTimes(2)
 })
 
-test('reuses missing dates for untracked files in production', async () => {
-  vi.stubEnv('NODE_ENV', 'production')
+test('reuses missing dates for untracked files in production', () => {
+  const scope = {}
+  Git.resetCache({ scope, enabled: true })
   vi.mocked(execSync).mockReturnValue('')
-  const { getLastModified } = await import('./git.js')
 
-  expect(getLastModified('new.mdx')).toBeUndefined()
-  expect(getLastModified('new.mdx')).toBeUndefined()
+  expect(Git.getLastModified('new.mdx', { scope })).toBeUndefined()
+  expect(Git.getLastModified('new.mdx', { scope })).toBeUndefined()
   expect(execSync).toHaveBeenCalledTimes(1)
 })
 
-test('retries failed Git lookups', async () => {
-  vi.stubEnv('NODE_ENV', 'production')
+test('retries failed Git lookups', () => {
+  const scope = {}
+  Git.resetCache({ scope, enabled: true })
   vi.mocked(execSync)
     .mockImplementationOnce(() => {
       throw new Error('Git unavailable')
     })
     .mockReturnValueOnce('2026-01-01\n')
-  const { getLastModified } = await import('./git.js')
 
-  expect(getLastModified('index.mdx')).toBeUndefined()
-  expect(getLastModified('index.mdx')).toBe('2026-01-01')
+  expect(Git.getLastModified('index.mdx', { scope })).toBeUndefined()
+  expect(Git.getLastModified('index.mdx', { scope })).toBe('2026-01-01')
   expect(execSync).toHaveBeenCalledTimes(2)
 })
 
-test('reads fresh dates in development, even after a production lookup', async () => {
-  vi.stubEnv('NODE_ENV', 'production')
+test('isolates configurations and invalidates missing dates between builds', () => {
+  const first = {}
+  const second = {}
+  Git.resetCache({ scope: first, enabled: true })
+  Git.resetCache({ scope: second, enabled: true })
+  vi.mocked(execSync).mockReturnValueOnce('').mockReturnValueOnce('2026-01-01\n')
+  expect(Git.getLastModified('index.mdx', { scope: first })).toBeUndefined()
+  expect(Git.getLastModified('index.mdx', { scope: second })).toBe('2026-01-01')
+  Git.resetCache({ scope: first, enabled: true })
+  vi.mocked(execSync).mockReturnValueOnce('2026-02-01\n')
+  expect(Git.getLastModified('index.mdx', { scope: first })).toBe('2026-02-01')
+  expect(Git.getLastModified('index.mdx', { scope: second })).toBe('2026-01-01')
+  expect(execSync).toHaveBeenCalledTimes(3)
+})
+
+test('reads fresh dates when caching is disabled', () => {
+  const scope = {}
+  Git.resetCache({ scope, enabled: true })
   vi.mocked(execSync)
     .mockReturnValueOnce('2026-01-01\n')
     .mockReturnValueOnce('2026-02-01\n')
     .mockReturnValueOnce('2026-03-01\n')
-  const { getLastModified } = await import('./git.js')
 
-  expect(getLastModified('index.mdx')).toBe('2026-01-01')
-  vi.stubEnv('NODE_ENV', 'development')
-  expect(getLastModified('index.mdx')).toBe('2026-02-01')
-  expect(getLastModified('index.mdx')).toBe('2026-03-01')
+  expect(Git.getLastModified('index.mdx', { scope })).toBe('2026-01-01')
+  Git.resetCache({ scope, enabled: false })
+  expect(Git.getLastModified('index.mdx', { scope })).toBe('2026-02-01')
+  expect(Git.getLastModified('index.mdx', { scope })).toBe('2026-03-01')
   expect(execSync).toHaveBeenCalledTimes(3)
 })
